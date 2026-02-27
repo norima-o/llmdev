@@ -1,8 +1,22 @@
-# app.py（修正版：SSEで“待ち”を明示 / 履歴表示 / クリアはthread切替）
-# そのまま original/app.py に置き換える想定です。
-# ※ templates/index.html 側は /stream を叩くJS実装が必要（前回例の main.js など）
+"""
+app.py
+
+Flaskアプリケーション本体。
+
+役割:
+- HTTPエンドポイントの提供
+- セッション管理（thread_id単位）
+- SSE (Server-Sent Events) によるストリーミング応答
+- graph.py との接続
+
+設計方針:
+- 会話状態は LangGraph + MemorySaver 側に持たせる
+- Flask側は「thread_idの払い出し」と「イベントの中継」に専念する
+- メモリを全消ししない（マルチユーザー安全設計）
+"""
 
 # VS Codeのデバッグ実行で import エラーを出さない対策
+# 実行ファイルが original/app.py の場合にプロジェクトルートを通す
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,7 +35,13 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "your_secret_key")
 
 
 def _ensure_thread_id() -> str:
-    """セッションにthread_idが無ければ作って返す"""
+    """
+    セッションにthread_idが存在することを保証する。
+
+    設計意図:
+    - thread_id単位でLangGraphのMemorySaverが会話履歴を管理する
+    - FlaskセッションとLangGraphのスレッドを1対1対応させる
+    """
     if "thread_id" not in session:
         session["thread_id"] = str(uuid.uuid4())
     return session["thread_id"]
@@ -30,8 +50,13 @@ def _ensure_thread_id() -> str:
 @app.route("/", methods=["GET"])
 def index():
     """
-    初期画面。
-    ※ここで memory.storage.clear() しない（全ユーザー/全スレッド影響の可能性があるため）
+    初期画面表示。
+
+    注意:
+    - ここで memory.storage.clear() をしない。
+      理由:
+        MemorySaverは全ユーザー共有インスタンスのため、
+        クリアすると他ユーザーの会話も消える可能性がある。
     """
     _ensure_thread_id()
     return make_response(render_template("index.html", messages=[]))
@@ -40,7 +65,9 @@ def index():
 @app.route("/history", methods=["GET"])
 def history():
     """
-    現在thread_idの履歴を表示
+    現在のthread_idに紐づく履歴を表示。
+
+    graph.py 側が MemorySaver から履歴を取得する。
     """
     thread_id = _ensure_thread_id()
     messages = get_messages_list(memory, thread_id)
@@ -49,6 +76,18 @@ def history():
 
 @app.route("/stream", methods=["POST"])
 def stream():
+    """
+    チャット送信口（SSE対応）。
+
+    設計:
+    - 通常のJSONレスポンスではなく text/event-stream を返す
+    - フロントは main.js で逐次イベントを受信
+    - thinking → done の2段階イベントを返す
+
+    なぜSSEか？
+    - ユーザーに「考え中」を明示するため
+    - 将来的にトークン逐次表示へ拡張可能
+    """
     thread_id = _ensure_thread_id()
     user_message = request.form.get("user_message", "").strip()
 
@@ -77,14 +116,20 @@ def stream():
 @app.route("/clear", methods=["POST"])
 def clear():
     """
-    会話クリア：
-    - MemorySaverは全消しが危険なので、基本は「thread_idを新規発行」して新規会話扱いにする。
-    - これでユーザー体感としては“クリア”になる。
+    会話クリア。
+
+    実装戦略:
+    - メモリを直接消さない
+    - thread_idを新規発行することで「新しい会話」として扱う
+
+    理由:
+    - MemorySaverはグローバルなので安全に部分削除しにくい
+    - thread_id変更が最も安全
     """
     session["thread_id"] = str(uuid.uuid4())
     return make_response(render_template("index.html", messages=[]))
 
 
 if __name__ == "__main__":
-    # debug=True は開発時のみ
+    # 本番では debug=False にする
     app.run(debug=True)

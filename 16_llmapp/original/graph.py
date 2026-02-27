@@ -1,5 +1,20 @@
-# graph.py（RAG + Web検索 + キャラクター固定 + “待ち”イベント用ストリーム）
-# ※依存: langchain / langgraph / chromadb / tavily / python-dotenv / tiktoken
+"""
+graph.py
+
+LangGraph + LangChain による会話制御モジュール。
+
+責務:
+- RAGインデックス構築
+- ツール定義（RAG + Web検索）
+- グラフ構築
+- 会話メモリ管理
+- ボット応答生成
+
+設計思想:
+- Flaskとは疎結合にする
+- graph.pyは「LLMオーケストレーション層」
+- UIやHTTPとは独立
+"""
 
 import os
 import json
@@ -28,23 +43,40 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 # =========================
 load_dotenv(".env")
 
-# あなたの既存コード互換：API_KEY を OPENAI_API_KEY に移す
+# 既存コード互換：API_KEY を OPENAI_API_KEY に移す
 if os.getenv("API_KEY") and not os.getenv("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = os.environ["API_KEY"]
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# MemorySaver（thread_id単位の会話保持）
+# -----------------------------
+# メモリ
+# -----------------------------
+
+"""
+MemorySaverはスレッド(thread_id)単位で会話を保存する。
+
+注意:
+- プロセス内メモリなのでサーバ再起動で消える
+- マルチインスタンス環境では共有されない
+- 本番ではRedisやDBベースのcheckpointerへ変更推奨
+"""
 memory = MemorySaver()
 
-# グラフは初回のみ構築して使い回す
-graph = None
+graph = None  # 初回のみbuildする（起動高速化）
 
 
 # =========================
 # Character / System Prompt
 # =========================
+"""
+System Promptは「人格」「方針」「ツール優先順位」を定義する。
+
+なぜコードに埋め込む？
+- プロンプト管理を集中させるため
+- 将来外部ファイル化も可能
+"""
 SYSTEM_PROMPT = """
 あなたは忍者修行中の少年キャラクターです。
 丁寧で簡潔に答えてください。
@@ -134,9 +166,12 @@ def create_index(persist_directory: str, embedding_model: OpenAIEmbeddings) -> C
 
 def define_tools():
     """
-    RAGツール + Web検索ツールを定義。
-    - TAVILY_API_KEY が無い場合は Web検索ツールを無効化（Tavily APIキー未設定等でツール呼び出しがハング/例外）
-    - data/pdf が無い場合も RAG を無効化して落とさない（前段の安定化も込み）
+    使用するツールを定義。
+
+    設計方針:
+    - Web検索はAPIキーがある時だけ有効
+    - PDFが無い場合はRAGを無効化
+    - 落ちない設計を優先
     """
     current_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -300,7 +335,7 @@ def get_messages_list(checkpointer: MemorySaver, thread_id: str):
     messages = []
     snapshot = checkpointer.get({"configurable": {"thread_id": thread_id}})
 
-    # ★まだ何も保存されていないthread_idの場合
+    # まだ何も保存されていないthread_idの場合
     if not snapshot:
         return messages
 
